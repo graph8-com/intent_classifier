@@ -16,16 +16,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import re
 import logging
 import pathlib
 import sys
 import time
 from typing import Iterable, List, Optional
 
-import blingfire
 import numpy as np
 import pandas as pd
-from sentence_transformers import SentenceTransformer, util
+from sentence_transformers import SentenceTransformer
 from uuid import uuid4
 
 # ---------------------------------------------------------------------------
@@ -74,9 +74,12 @@ def load_topics(path: pathlib.Path, model: SentenceTransformer):
 
 
 def build_snippet(text: str) -> str:
-    sentences = blingfire.text_to_sentences(text).split("\n")
+    # Simple sentence split using regex on punctuation + whitespace
+    sentences = [
+        s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", text) if s.strip()
+    ]
     ranked = sorted(
-        (s.strip() for s in sentences if len(s.split()) >= MIN_SENT_TOKENS),
+        (s for s in sentences if len(s.split()) >= MIN_SENT_TOKENS),
         key=lambda s: -sum(ch.isalnum() for ch in s),
     )
     words: List[str] = []
@@ -144,32 +147,25 @@ def topk_topics(vec: np.ndarray, topic_mat: np.ndarray, topic_names: List[str], 
 
 
 # ---------------------------------------------------------------------------
-# Core workflow
+# Core workflow (texts only)
 # ---------------------------------------------------------------------------
 
 
-async def classify_urls(urls: List[str],texts: List[str], topk: int = 5):
-    device = "cuda" if util.torch.cuda.is_available() else "cpu"
+async def classify_texts(texts: List[str], topk: int = 5, topics_path: pathlib.Path | str = "topics.csv"):
+    try:
+        import torch  # local import to avoid startup overhead if not needed
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        device = "cpu"
     model = SentenceTransformer(MODEL_NAME, device=device)
 
-    topic_names, topic_mat = load_topics(pathlib.Path("topics.csv"), model)
-
-    # ── Fetch pages ────────────────────────────────────────────
-    t_fetch0 = time.perf_counter()
-    async with httpx.AsyncClient(http2=True, follow_redirects=True) as session:
-        sem = asyncio.Semaphore(NUM_CONCURRENT_FETCH)
-
-        async def bounded(u):
-            async with sem:
-                return await fetch_url(session, u)
-
-        pages = await asyncio.gather(*[bounded(u) for u in urls])
-    print(f"Fetched {len(urls)} pages in {time.perf_counter() - t_fetch0:.2f}s ({len(urls) / (time.perf_counter() - t_fetch0):.2f}/s)")
+    topic_names, topic_mat = load_topics(pathlib.Path(topics_path), model)
 
     # ── Build snippets ────────────────────────────────────────
     t_snip0 = time.perf_counter()
-    snippets = [f"{url} {page}" if page else url for url, page in zip(urls, pages)]
+    snippets = [build_snippet(t) for t in texts]
     print(f"Built snippets in {time.perf_counter() - t_snip0:.2f}s")
+
     # ── Embed with cache ──────────────────────────────────────
     t_emb0 = time.perf_counter()
     vecs = embed_snippets_cached(model, snippets)
@@ -178,13 +174,13 @@ async def classify_urls(urls: List[str],texts: List[str], topk: int = 5):
     # ── Classify & collect results ────────────────────────────
     t_cls0 = time.perf_counter()
     records = []
-    for url, vec in zip(urls, vecs):
+    for idx, vec in enumerate(vecs):
         matches = topk_topics(vec, topic_mat, topic_names, topk)
         flat = {f"topic_{i+1}": t for i, (t, _) in enumerate(matches)}
         flat.update({f"score_{i+1}": s for i, (_, s) in enumerate(matches)})
-        flat["url"] = url
+        flat["text_index"] = idx
         records.append(flat)
-    print(f"Similarity search for {len(urls)} docs took {time.perf_counter() - t_cls0:.2f}s")
+    print(f"Similarity search for {len(texts)} docs took {time.perf_counter() - t_cls0:.2f}s")
 
     df = pd.DataFrame(records)
     out_path = "results.csv"
@@ -199,48 +195,34 @@ async def classify_urls(urls: List[str],texts: List[str], topk: int = 5):
 
 
 def parse_args(argv: Iterable[str]):
-    p = argparse.ArgumentParser(description="URL topic classifier (v1.4)")
-    p.add_argument("inputs", nargs="?", help="File with URLs OR comma‑separated URLs")
+    p = argparse.ArgumentParser(description="Text intent/topic classifier (v1.5)")
+    p.add_argument("inputs", nargs="?", help="File with texts OR comma‑separated texts")
     p.add_argument("--topk", type=int, default=5, help="Top‑k topics to save")
     return p.parse_args(argv)
 
 
 def load_inputs(inp: Optional[str]) -> List[str]:
     if inp is None:
-        return globals().get("urls", ["https://google.com"])
+        return globals().get("texts", ["example input text"])
     path = pathlib.Path(inp)
     if path.exists():
-        return [l.strip() for l in path.read_text().splitlines() if l.strip()]
+        return [line.strip() for line in path.read_text().splitlines() if line.strip()]
     return [x.strip() for x in inp.split(",") if x.strip()]
 
 
 async def _amain():
-    args = 2
-    urls_list = urls
+    args = parse_args(sys.argv[1:])
+    texts_list = load_inputs(args.inputs)
     start = time.perf_counter()
-    df = await classify_urls(urls_list, topk=2)
+    df = await classify_texts(texts_list, topk=args.topk)
     print(f"TOTAL wall time: {time.perf_counter() - start:.2f}s")
-    # show markdown preview in notebooks
     try:
-        from IPython.display import Markdown, display
-
-        display(Markdown(df.to_markdown(index=False)))
-    except ImportError:
         print(df.to_string(index=False))
-
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Top‑level await for Colab / Jupyter
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # In standard Python >=3.11 you could use asyncio.run inside an if/else, but
-    # for Colab we keep explicit await so users can re‑run cells.
-    try:
-        # If already inside an event loop (e.g., Jupyter) use await directly.
-        import nest_asyncio  # type: ignore
-
-        nest_asyncio.apply()
-        await _amain()  # type: ignore[misc]
-    except RuntimeError:
-        # Fallback for plain scripts: no running loop → create one.
-        asyncio.run(_amain())
+    asyncio.run(_amain())
