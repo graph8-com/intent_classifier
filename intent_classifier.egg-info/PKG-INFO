@@ -1,0 +1,36 @@
+Metadata-Version: 2.4
+Name: intent-classifier
+Version: 0.1.0
+Summary: Add your description here
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.26
+Requires-Dist: pandas>=2.2
+Requires-Dist: sentence-transformers>=2.7
+Requires-Dist: torch>=2.2
+
+## Intent Classifier (texts only)
+
+Classify raw texts into the closest topics using `sentence-transformers` with caching and detailed timing logs.
+
+### Usage
+
+1) Prepare a `topics.csv` file with at least a `topic_name` column. Optional columns: `category`, `theme`.
+
+2) Provide texts via a file (one per line) or as a comma-separated string.
+
+Run:
+
+```bash
+python -m intent_classifier.main "path/to/texts.txt" --topk 5
+# or
+python -m intent_classifier.main "text one, another text, final text" --topk 3
+```
+
+The results are saved to `results.csv` with `topic_1..k`, `score_1..k`, and `text_index`.
+
+### Notes
+
+- The model is `intfloat/multilingual-e5-large`.
+- Embeddings are cached to speed up repeated runs.
+
