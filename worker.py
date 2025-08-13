@@ -249,7 +249,9 @@ def fetch_pending(
     sql = f"""
     SELECT id, created_at, priority, url, content
     FROM {table}
-    WHERE (topic_ids IS NULL OR length(topic_ids) = 0) AND (content IS NOT NULL OR url IS NOT NULL)
+    WHERE (topic_ids IS NULL OR length(topic_ids) = 0)
+      AND (content IS NOT NULL OR url IS NOT NULL)
+      AND http_status = 200
     ORDER BY priority DESC, created_at ASC
     LIMIT {limit}
     """
@@ -298,7 +300,12 @@ def process_batch(
         return []
 
     # Embed and compute top-k
+    logger.info("Starting embedding process for {} texts...", len(texts))
+    start_time = time.time()
     vecs = embed_snippets_cached(model, texts)
+    end_time = time.time()
+    logger.info("Completed embedding process in {:.2f} seconds.", end_time - start_time)
+
     updates: List[Tuple[str, List[str]]] = []
     for idx, vec in enumerate(vecs):
         matches = topk_topics(vec, topic_mat, topic_names, topk)
