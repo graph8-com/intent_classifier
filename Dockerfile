@@ -10,20 +10,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy project files
 COPY pyproject.toml uv.lock README.md ./
-COPY main.py ./
+COPY main.py worker.py clickhouse_check.py ./
+# Optional default topics bundled; can be overridden by mounting
+COPY topics.csv ./
 
 # Use uv for fast/locked installs
 RUN pip install --no-cache-dir uv && \
     uv sync --frozen --no-dev
 
-# Add a non-root user
-RUN useradd -m appuser
+# Add a non-root user and fix permissions on app dir and venv
+RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
-# Default topics path mounted at runtime; override with --topics
+# Default topics path; can be set/overridden via env or volume
 ENV TOPICS_PATH=/app/topics.csv
+ENV PATH=/app/.venv/bin:$PATH
 
-ENTRYPOINT ["uv", "run", "python", "main.py"]
-CMD ["--topk", "5", "--topics", "/app/topics.csv"]
+# Run the installed console script directly (no build at runtime)
+ENTRYPOINT ["intent-worker"]
 
 
