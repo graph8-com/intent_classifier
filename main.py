@@ -27,20 +27,78 @@ import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 from uuid import uuid4
+import base64
+import urllib.parse
+import urllib.request
+from loguru import logger
 
 # ---------------------------------------------------------------------------
 # Logging & constants
 # ---------------------------------------------------------------------------
-logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    level=logging.INFO,
-    datefmt="%H:%M:%S",
-)
+
 CACHE_DIR = pathlib.Path(f"{uuid4()}")  # embedding cache location
 
 MODEL_NAME = "intfloat/multilingual-e5-large"  # 384‑dim multilingual model
 MAX_TOKENS_DOC = 40_000  # generous window
 MIN_SENT_TOKENS = 5  # skip trivial sentences
+
+# ---------------------------------------------------------------------------
+# ClickHouse connectivity (HTTP API using JDBC URL parsing)
+# ---------------------------------------------------------------------------
+
+
+def parse_clickhouse_jdbc_url(jdbc_url: str) -> dict:
+    """Parse a ClickHouse JDBC URL into components.
+
+    Supports forms like:
+      jdbc:clickhouse://host:8443/database?ssl=true&sslmode=strict
+    """
+    if not jdbc_url.startswith("jdbc:clickhouse://"):
+        raise ValueError("Expected a ClickHouse JDBC URL starting with jdbc:clickhouse://")
+    raw = jdbc_url[len("jdbc:clickhouse://") :]
+    host_port_db, _, query_str = raw.partition("?")
+    host_port, _, database = host_port_db.partition("/")
+    host, _, port_str = host_port.partition(":")
+    if not host:
+        raise ValueError("Missing host in JDBC URL")
+    port = int(port_str) if port_str else 8123
+    params = urllib.parse.parse_qs(query_str, keep_blank_values=True)
+    flat_params = {k: v[0] for k, v in params.items()}
+    use_ssl = flat_params.get("ssl", "false").lower() in ("1", "true", "yes") or port == 8443
+    return {
+        "host": host,
+        "port": port,
+        "database": database or "default",
+        "ssl": use_ssl,
+        "params": flat_params,
+    }
+
+
+def test_clickhouse_connection(jdbc_url: str, user: str, password: str, timeout: float = 10.0) -> bool:
+    """Perform a minimal SELECT 1 using ClickHouse HTTP interface.
+
+    Uses Basic Auth and honors ssl based on the JDBC URL.
+    Returns True when HTTP 200 is received and response body is not empty.
+    """
+    conf = parse_clickhouse_jdbc_url(jdbc_url)
+    scheme = "https" if conf["ssl"] else "http"
+    base_url = f"{scheme}://{conf['host']}:{conf['port']}/"
+    url = f"{base_url}?database={urllib.parse.quote(conf['database'])}"
+    data = b"SELECT 1"
+    token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+    headers = {
+        "Authorization": f"Basic {token}",
+        "Content-Type": "text/plain; charset=utf-8",
+        "Accept": "text/plain",
+    }
+    req = urllib.request.Request(url=url, data=data, method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read()
+            return resp.status == 200 and len(body) > 0
+    except Exception as exc:
+        logger.error(f"ClickHouse connection test failed: {exc}")
+        return False
 
 # ---------------------------------------------------------------------------
 # Topic loading & embedding
@@ -198,6 +256,7 @@ def parse_args(argv: Iterable[str]):
     p = argparse.ArgumentParser(description="Text intent/topic classifier (v1.5)")
     p.add_argument("inputs", nargs="?", help="File with texts OR comma‑separated texts")
     p.add_argument("--topk", type=int, default=5, help="Top‑k topics to save")
+    p.add_argument("--topics", default="topics.csv", help="Path to topics.csv")
     return p.parse_args(argv)
 
 
@@ -214,7 +273,7 @@ async def _amain():
     args = parse_args(sys.argv[1:])
     texts_list = load_inputs(args.inputs)
     start = time.perf_counter()
-    df = await classify_texts(texts_list, topk=args.topk)
+    df = await classify_texts(texts_list, topk=args.topk, topics_path=args.topics)
     print(f"TOTAL wall time: {time.perf_counter() - start:.2f}s")
     try:
         print(df.to_string(index=False))
@@ -225,4 +284,7 @@ async def _amain():
 # Top‑level await for Colab / Jupyter
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    asyncio.run(_amain())
+
+def main() -> None:
     asyncio.run(_amain())

@@ -1,0 +1,14 @@
+services:
+  intent:
+    build: .
+    image: intent-classifier:latest
+    working_dir: /app
+    # Default to print help and exit so `docker compose up` returns quickly.
+    command: ["--help"]
+    # Uncomment to mount local data files
+    # volumes:
+    #   - ./topics.csv:/app/topics.csv:ro
+    #   - ./texts.txt:/app/texts.txt:ro
+    # Example command override:
+    # command: ["/app/texts.txt", "--topk", "5", "--topics", "/app/topics.csv"]
+

@@ -9,10 +9,16 @@ dependencies = [
   "pandas>=2.2",
   "sentence-transformers>=2.7",
   "torch>=2.2",
+  "python-dotenv>=1.0",
+  "loguru>=0.7.3",
 ]
 
 [project.scripts]
-intent-classifier = "intent_classifier.__main__:main"
+intent-classifier = "main:main"
+intent-worker = "worker:main"
+
+[tool.setuptools]
+py-modules = ["main", "clickhouse_check", "worker"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
