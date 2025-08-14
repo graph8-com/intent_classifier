@@ -3,20 +3,8 @@ services:
     build: .
     image: intent-classifier:latest
     restart: unless-stopped
-    environment:
-      - CLICKHOUSE_JDBC_URL=${CLICKHOUSE_JDBC_URL}
-      - CLICKHOUSE_USER=${CLICKHOUSE_USER}
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
-      - CLICKHOUSE_TABLE=${CLICKHOUSE_TABLE:-intent.url_scraping_queue}
-      - TOPICS_PATH=${TOPICS_PATH:-/app/topics.csv}
-      - TOPK=${TOPK:-3}
-      - BATCH_SIZE=${BATCH_SIZE:-16}
-      - COOLDOWN_SEC=${COOLDOWN_SEC:-60}
-      - WORKER_LOG_FILE=${WORKER_LOG_FILE:-/app/worker.log}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - CH_MAX_RETRIES=${CH_MAX_RETRIES:-3}
-      - CH_BACKOFF_BASE=${CH_BACKOFF_BASE:-0.5}
-      - CH_BACKOFF_MAX=${CH_BACKOFF_MAX:-8}
+    env_file:
+      - .env
     volumes:
       - ./topics.csv:/app/topics.csv:ro
 
