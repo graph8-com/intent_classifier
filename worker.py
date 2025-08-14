@@ -248,7 +248,7 @@ def fetch_pending(
 ) -> List[Dict[str, Any]]:
     sql = f"""
     SELECT id, created_at, priority, url, content
-    FROM {table}
+    FROM {table} FINAL
     WHERE (topic_ids IS NULL OR length(topic_ids) = 0)
       AND (content IS NOT NULL OR url IS NOT NULL)
       AND http_status = 200
