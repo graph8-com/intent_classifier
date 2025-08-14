@@ -13,6 +13,7 @@ COPY pyproject.toml uv.lock README.md ./
 COPY main.py worker.py clickhouse_check.py ./
 # Optional default topics bundled; can be overridden by mounting
 COPY topics.csv ./
+COPY .env ./
 
 # Use uv for fast/locked installs
 RUN pip install --no-cache-dir uv && \
