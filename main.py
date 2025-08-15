@@ -180,7 +180,7 @@ def embed_snippets_cached(model: SentenceTransformer, snippets: List[str]) -> np
     missing = [i for i, v in enumerate(vecs) if v is None]
 
     if missing:
-        new_vecs = model.encode([snippets[i] for i in missing], normalize_embeddings=True, batch_size=os.getenv("BATCH_SIZE", 16))
+        new_vecs = model.encode([snippets[i] for i in missing], normalize_embeddings=True, batch_size=int(os.getenv("BATCH_SIZE", 16)))
         new_vecs = [np.asarray(v, dtype=np.float32) for v in new_vecs]
         for i, v in zip(missing, new_vecs):
             vecs[i] = v
