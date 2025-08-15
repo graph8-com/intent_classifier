@@ -121,7 +121,7 @@ def load_topics(path: pathlib.Path, model: SentenceTransformer):
     texts = [full_text(r) for _, r in df.iterrows()]
     names = df["topic_name"].astype(str).tolist()
     print(f"Embedding {len(names)} topics …")
-    vecs = model.encode(texts, normalize_embeddings=True, batch_size=os.getenv("BATCH_SIZE", 16))
+    vecs = model.encode(texts, normalize_embeddings=True, batch_size=int(os.getenv("BATCH_SIZE", 16)))
     return names, np.asarray(vecs, dtype=np.float32)
 
 
