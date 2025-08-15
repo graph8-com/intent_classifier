@@ -188,6 +188,67 @@ def build_update_sql(
     )
 
 
+def _build_scalar_literal(value: str, ch_type: str) -> str:
+    t = ch_type.upper()
+    if t == "UUID":
+        return f"toUUID('{ch_escape_string(value)}')"
+    if t in ("INT32", "INT64", "UINT32", "UINT64"):
+        return str(int(value))
+    return f"'{ch_escape_string(value)}'"
+
+
+def _build_array_literal(values: Sequence[str], inner_type: str) -> str:
+    inner = inner_type.upper()
+    if inner == "UUID":
+        items = ", ".join([f"toUUID('{ch_escape_string(v)}')" for v in values])
+    elif inner in ("INT32", "INT64", "UINT32", "UINT64"):
+        items = ", ".join([str(int(v)) for v in values])
+    else:
+        items = ", ".join([f"'{ch_escape_string(v)}'" for v in values])
+    return f"[{items}]"
+
+
+def build_batch_update_sql(
+    table: str,
+    updates: Sequence[Tuple[str, Sequence[str]]],
+    id_type: str,
+    topic_ids_inner_type: str,
+) -> str:
+    """Build a single ALTER UPDATE that applies different topic arrays per id.
+
+    We construct two parallel array literals: one for ids and one for the topic arrays.
+    Then we use indexOf + arrayElement to select the matching topics by id.
+    """
+    if not updates:
+        raise ValueError("build_batch_update_sql called with empty updates")
+
+    # Array of id literals for expressions and tuple form for WHERE
+    id_literals = [_build_scalar_literal(row_id, id_type) for row_id, _ in updates]
+    ids_array_expr = f"[{', '.join(id_literals)}]"
+    ids_tuple_expr = f"({', '.join(id_literals)})"
+
+    # Array of arrays for topic_ids
+    topic_arrays = [
+        _build_array_literal(topic_values, topic_ids_inner_type)
+        for _, topic_values in updates
+    ]
+    topics_arrays_expr = f"[{', '.join(topic_arrays)}]"
+
+    pos_expr = f"indexOf({ids_array_expr}, id)"
+    topic_pick_expr = (
+        f"if({pos_expr} > 0, arrayElement({topics_arrays_expr}, {pos_expr}), topic_ids)"
+    )
+    ts_pick_expr = f"if({pos_expr} > 0, now(), topic_resolved_at)"
+
+    sql = (
+        f"ALTER TABLE {table} UPDATE "
+        f"topic_ids = {topic_pick_expr}, "
+        f"topic_resolved_at = {ts_pick_expr} "
+        f"WHERE id IN {ids_tuple_expr}"
+    )
+    return sql
+
+
 def parse_db_table(qualified: str, default_db: str) -> Tuple[str, str]:
     if "." in qualified:
         db, tbl = qualified.split(".", 1)
@@ -395,23 +456,42 @@ def main() -> None:
             time.sleep(min(10, cooldown_sec))
             continue
 
-        applied = 0
-        for row_id, topics in updates:
-            try:
-                # Convert topic names to proper value strings based on column type
-                if topic_ids_inner_type.upper() in ("INT32", "INT64", "UINT32", "UINT64"):
-                    topic_values = [name_to_id.get(t) for t in topics]
-                    topic_values = [v for v in topic_values if v is not None]
-                    if not topic_values:
-                        logger.warning("No topic IDs found for row {} (names={})", row_id, topics)
-                        continue
-                else:
-                    topic_values = topics
+        # Try batch update first
+        converted_updates: List[Tuple[str, List[str]]] = []
+        int_like = topic_ids_inner_type.upper() in ("INT32", "INT64", "UINT32", "UINT64")
+        for row_id, topic_names_sel in updates:
+            if int_like:
+                mapped = [name_to_id.get(t) for t in topic_names_sel]
+                mapped = [m for m in mapped if m is not None]
+                if not mapped:
+                    logger.warning("No topic IDs found for row {} (names={})", row_id, topic_names_sel)
+                    continue
+                converted_updates.append((row_id, mapped))
+            else:
+                converted_updates.append((row_id, topic_names_sel))
 
+        if converted_updates:
+            try:
+                batch_sql = build_batch_update_sql(
+                    table=table,
+                    updates=converted_updates,
+                    id_type=id_type,
+                    topic_ids_inner_type=topic_ids_inner_type,
+                )
+                ch.execute(batch_sql)
+                logger.info("Applied batch updates: {}/{}", len(converted_updates), len(updates))
+                continue
+            except Exception as exc:
+                logger.warning("Batch update failed ({}). Falling back to per-row updates.", exc)
+
+        # Fallback to per-row updates
+        applied = 0
+        for row_id, topics in converted_updates:
+            try:
                 sql = build_update_sql(
                     table=table,
                     row_id=row_id,
-                    topic_values=topic_values,
+                    topic_values=topics,
                     id_type=id_type,
                     topic_ids_inner_type=topic_ids_inner_type,
                 )
@@ -420,7 +500,7 @@ def main() -> None:
             except Exception as exc:
                 logger.error("Update failed for id={}: {}", row_id, exc)
 
-        logger.info("Applied updates: {}/{}", applied, len(updates))
+        logger.info("Applied updates (fallback): {}/{}", applied, len(converted_updates))
 
 
 if __name__ == "__main__":
