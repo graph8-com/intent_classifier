@@ -249,6 +249,73 @@ def build_batch_update_sql(
     return sql
 
 
+def build_batch_insert_select_sql(
+    table: str,
+    updates: Sequence[Tuple[str, Sequence[str]]],
+    id_type: str,
+    topic_ids_inner_type: str,
+) -> str:
+    """Build an INSERT ... SELECT that replaces topic_ids and timestamps via SELECT * REPLACE.
+
+    This avoids ALTER UPDATE mutations and follows insert-only best practices for
+    ReplacingMergeTree/SharedReplacingMergeTree tables.
+    """
+    if not updates:
+        raise ValueError("build_batch_insert_select_sql called with empty updates")
+
+    # Array of id literals and tuple for WHERE
+    id_literals = [_build_scalar_literal(row_id, id_type) for row_id, _ in updates]
+    ids_array_expr = f"[{', '.join(id_literals)}]"
+    ids_tuple_expr = f"({', '.join(id_literals)})"
+
+    # Array of arrays for topic_ids
+    topic_arrays = [
+        _build_array_literal(topic_values, topic_ids_inner_type)
+        for _, topic_values in updates
+    ]
+    topics_arrays_expr = f"[{', '.join(topic_arrays)}]"
+
+    pos_expr = f"indexOf({ids_array_expr}, id)"
+    topic_pick_expr = f"arrayElement({topics_arrays_expr}, {pos_expr})"
+
+    # Use SELECT * REPLACE to preserve all other columns without enumerating them
+    sql = (
+        f"INSERT INTO {table} "
+        f"SELECT * REPLACE("
+        f"{topic_pick_expr} AS topic_ids, "
+        f"now() AS topic_resolved_at, "
+        f"now() AS `_version`"  # ensure version is bumped
+        f") FROM {table} FINAL "
+        f"WHERE id IN {ids_tuple_expr}"
+    )
+    return sql
+
+
+def build_single_insert_select_sql(
+    table: str,
+    row_id: str,
+    topic_values: Sequence[str],
+    id_type: str,
+    topic_ids_inner_type: str,
+) -> str:
+    """Single-row variant of INSERT ... SELECT using array literal of size 1."""
+    ids_array_expr = f"[{_build_scalar_literal(row_id, id_type)}]"
+    topics_arrays_expr = f"[{_build_array_literal(topic_values, topic_ids_inner_type)}]"
+    pos_expr = f"indexOf({ids_array_expr}, id)"
+    topic_pick_expr = f"arrayElement({topics_arrays_expr}, {pos_expr})"
+    id_where = ids_array_expr[1:-1]  # strip brackets to get scalar literal
+    sql = (
+        f"INSERT INTO {table} "
+        f"SELECT * REPLACE("
+        f"{topic_pick_expr} AS topic_ids, "
+        f"now() AS topic_resolved_at, "
+        f"now() AS `_version`"
+        f") FROM {table} FINAL "
+        f"WHERE id = {id_where}"
+    )
+    return sql
+
+
 def parse_db_table(qualified: str, default_db: str) -> Tuple[str, str]:
     if "." in qualified:
         db, tbl = qualified.split(".", 1)
@@ -449,14 +516,14 @@ def main() -> None:
 
         logger.info("Processing {} rows…", len(rows))
         try:
-            updates = process_batch(rows, model, topic_names, topic_mat, topk)
+             updates = process_batch(rows, model, topic_names, topic_mat, topk)
         except Exception as exc:
             logger.error("Batch processing failed: {}", exc)
             # Cooldown briefly to avoid hot loop on repeated failure
             time.sleep(min(10, cooldown_sec))
             continue
 
-        # Try batch update first
+        # Try batch insert-select first (insert-only semantics for ReplacingMergeTree)
         converted_updates: List[Tuple[str, List[str]]] = []
         int_like = topic_ids_inner_type.upper() in ("INT32", "INT64", "UINT32", "UINT64")
         for row_id, topic_names_sel in updates:
@@ -472,23 +539,23 @@ def main() -> None:
 
         if converted_updates:
             try:
-                batch_sql = build_batch_update_sql(
+                batch_sql = build_batch_insert_select_sql(
                     table=table,
                     updates=converted_updates,
                     id_type=id_type,
                     topic_ids_inner_type=topic_ids_inner_type,
                 )
                 ch.execute(batch_sql)
-                logger.info("Applied batch updates: {}/{}", len(converted_updates), len(updates))
+                logger.info("Applied batch upserts: {}/{}", len(converted_updates), len(updates))
                 continue
             except Exception as exc:
-                logger.warning("Batch update failed ({}). Falling back to per-row updates.", exc)
+                logger.warning("Batch insert-select failed ({}). Falling back to per-row insert-select.", exc)
 
-        # Fallback to per-row updates
+        # Fallback to per-row insert-select
         applied = 0
         for row_id, topics in converted_updates:
             try:
-                sql = build_update_sql(
+                sql = build_single_insert_select_sql(
                     table=table,
                     row_id=row_id,
                     topic_values=topics,
@@ -498,9 +565,9 @@ def main() -> None:
                 ch.execute(sql)
                 applied += 1
             except Exception as exc:
-                logger.error("Update failed for id={}: {}", row_id, exc)
+                logger.error("Insert-select failed for id={}: {}", row_id, exc)
 
-        logger.info("Applied updates (fallback): {}/{}", applied, len(converted_updates))
+        logger.info("Applied upserts (fallback): {}/{}", applied, len(converted_updates))
 
 
 if __name__ == "__main__":
