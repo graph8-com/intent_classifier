@@ -12,7 +12,7 @@ The rest (40 K token cap, disk cache, CSV output) is unchanged.
 """
 
 from __future__ import annotations
-
+import os
 import argparse
 import asyncio
 import hashlib
@@ -121,7 +121,7 @@ def load_topics(path: pathlib.Path, model: SentenceTransformer):
     texts = [full_text(r) for _, r in df.iterrows()]
     names = df["topic_name"].astype(str).tolist()
     print(f"Embedding {len(names)} topics …")
-    vecs = model.encode(texts, normalize_embeddings=True, batch_size=512)
+    vecs = model.encode(texts, normalize_embeddings=True, batch_size=os.getenv("BATCH_SIZE", "16"))
     return names, np.asarray(vecs, dtype=np.float32)
 
 
@@ -180,7 +180,7 @@ def embed_snippets_cached(model: SentenceTransformer, snippets: List[str]) -> np
     missing = [i for i, v in enumerate(vecs) if v is None]
 
     if missing:
-        new_vecs = model.encode([snippets[i] for i in missing], normalize_embeddings=True, batch_size=32)
+        new_vecs = model.encode([snippets[i] for i in missing], normalize_embeddings=True, batch_size=os.getenv("BATCH_SIZE", "16"))
         new_vecs = [np.asarray(v, dtype=np.float32) for v in new_vecs]
         for i, v in zip(missing, new_vecs):
             vecs[i] = v
